@@ -62,8 +62,8 @@
 }
 
 .switch {
-  stroke-width: 4px;
-  marker-end: url(#switchArrow);
+  stroke-width: 3px;
+  marker-end: url(#switcharrow);
   stroke: #000;
 }
 

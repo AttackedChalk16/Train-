@@ -19,6 +19,40 @@ class Switch:
     )
     MARKER <= svg.path(d='M0,0 L0,2 L3,1 L0,0')
     enabled = False
+    LENGTH_FRACTION = 0.4
+
+    def __init__(self, node, left):
+        self.node = node
+        self.left = left
+        self.dirtext = 'left' if self.left else 'right'
+        self.position = 0
+        self.arrow = None
+
+    def draw(self):
+        d = self._path()
+        self.arrow = svg.path(d=d)
+        self.arrow.bind('click', self.switch)
+        self.arrow.classList.add('switch')
+        self.arrow.classList.add('switch-' + self.dirtext)
+        return self.arrow
+
+    def _path(self):
+        target = self.node.get_link(self.left, self.position)
+        part = self.LENGTH_FRACTION / (abs(target.col - self.node.col) ** .75)
+        return rail_segment_d(self.node, target, part, relative=True)
+
+    def redraw(self):
+        if self.arrow is None:
+            return self.draw()
+
+    def switch(self, event=None):
+        if self.enabled:
+            print('switch ', self, ' flipped')
+
+    def __repr__(self):
+        return '<{}Switch{}({})>'.format(
+            self.dirtext.capitalize(), self.node, self.position
+        )
 
 
 class Exit:
@@ -28,22 +62,62 @@ class Exit:
     ]
 
 
-def curved_path(start, end, relative=False):
-    if relative:
-        raise NotImplementedError
+def curve_coors(start, end, part=1):
+    dx = end.x - start.x
+    dy = end.y - start.y
+    dcx = dx / 3
+    # dcx = (end.x - start.x) / abs(end.col - start.col)
+    if dy == 0:
+        return (dx * part,)
     else:
-        # dcx = (end.x - start.x) / abs(end.col - start.col)
-        dcx = (end.x - start.x) / 3
-        return 'C {scx} {start.y} {ecx} {end.y} {end.x} {end.y}'.format(
-            start=start, end=end, scx=start.x + dcx, ecx=end.x - dcx
-        )
+        coors = (dcx, 0, dx - dcx, dy, dx, dy)
+        if part == 1:
+            return coors
+        else:
+            return curve_split(coors, part)
 
 
-def rail_segment_path(start, end, relative=False):
-    if relative:
-        return 'M0 0' + curved_path(start, end, True)
-    else:
-        return 'M{0.x} {0.y}'.format(start) + curved_path(start, end, False)
+def curve_split(coors, part=1):
+    # performs de Casteljau algorithm for bezier curve splitting
+    # coors: control points as [x0, y0, x1, y1, x2, y2...]
+    # t in [0,1] is the percent where the curve is split
+    degree = len(coors) / 2  # should be 3 for cubic curves
+    current = (0, 0) + coors
+    coefs = [current]
+    while len(coefs) <= degree:
+        previous = current
+        current = []
+        for i in range(0, len(previous) - 2, 2):
+            current.append(previous[i] * (1-part) + previous[i+2] * part)
+            current.append(previous[i+1] * (1-part) + previous[i+3] * part)
+        coefs.append(current)
+    # return []
+    result = tuple(val for seg in coefs[1:] for val in seg[:2])
+    return result
+
+
+CURVE_SEGMENT_PATTERN = ' '.join(['{}'] * 6)
+
+
+def rail_path_d(nodes):
+    ds = []
+    for prev, next in zip(nodes[:-1], nodes[1:]):
+        coors = curve_coors(prev, next)
+        if len(coors) == 1:
+            ds.append('h' + str(coors[0]))
+        else:
+            ds.append('c' + CURVE_SEGMENT_PATTERN.format(*coors))
+    return 'M{0.x} {0.y}'.format(nodes[0]) + ''.join(ds)
+
+
+def rail_segment_d(start, end, part=1, relative=False):
+    coors = curve_coors(start, end, part=part)
+    return (
+        'M0 0' if relative else 'M{0.x} {0.y}'.format(start)
+    ) + (
+        ('h' + str(coors[0])) if len(coors) == 1
+        else 'c' + CURVE_SEGMENT_PATTERN.format(*coors)
+    )
 
 
 class Rail:
@@ -64,7 +138,7 @@ class Rail:
 
     def draw(self):
         self.path = svg.path(
-            d=rail_segment_path(self.left_node, self.right_node)
+            d=rail_segment_d(self.left_node, self.right_node)
         )
         self.path.classList.add('rail')
         if self.crossings:
@@ -119,16 +193,6 @@ class Rail:
 
     def __repr__(self):
         return '<Rail{0.left_node}-{0.right_node}>'.format(self)
-
-    @classmethod
-    def path_d(cls, nodes):
-        return 'M {0.x} {0.y}'.format(nodes[0]) + ''.join(
-            # go horizontal if rows are equal
-            ('H ' + str(next.x)) if prev.row == next.row
-            # cubic bezier for row transfers
-            else curved_path(prev, next)
-            for prev, next in zip(nodes[:-1], nodes[1:])
-        )
 
 
 class Grid:
@@ -291,7 +355,7 @@ class RailBuilder:
                 self.drag_nodes[-1].hide_build_endpoint()
             if new_drag_nodes:
                 new_drag_nodes[-1].show_build_endpoint()
-                self.drag_path.attrs['d'] = Rail.path_d(new_drag_nodes)
+                self.drag_path.attrs['d'] = rail_path_d(new_drag_nodes)
                 tgt_opacity = 1
             else:
                 tgt_opacity = 0
@@ -375,14 +439,23 @@ class Node:
         self.right_rails = []
         self._left_links = []
         self._right_links = []
+        self.left_switch = None
+        self.right_switch = None
+
+    def get_link(self, left, index):
+        return (self._left_links if left else self._right_links)[index]
 
     def add_left_rail(self, rail):
         self.left_rails.append(rail)
         self._left_links.append(rail.left_node)
+        if len(self.left_rails) == 2:
+            self.left_switch = Switch(self, True)
 
     def add_right_rail(self, rail):
         self.right_rails.append(rail)
         self._right_links.append(rail.right_node)
+        if len(self.right_rails) == 2:
+            self.right_switch = Switch(self, False)
 
     def draw(self, x, y):
         self.x = x
@@ -406,6 +479,17 @@ class Node:
             return node in self._left_links
 
     def redraw(self):
+        self.redraw_dead_end()
+        self.redraw_switch(self.left_switch)
+        self.redraw_switch(self.right_switch)
+
+    def redraw_switch(self, sw):
+        if sw is not None:
+            switch_object = sw.redraw()
+            if switch_object:
+                self.object <= switch_object
+
+    def redraw_dead_end(self):
         is_dead_end = (len(self.left_rails) == 0 or len(self.right_rails) == 0)
         if is_dead_end and not self.dead_end_stop:
             self.dead_end_stop = svg.rect(
