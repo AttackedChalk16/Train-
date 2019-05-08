@@ -22,7 +22,7 @@
     fill-opacity: 1;
 }
 
-.node circle:hover {
+.node.building circle:hover {
     fill-opacity: 0.5;
 }
 
@@ -36,6 +36,10 @@
   fill: none;
   stroke-width: 2px;
   stroke: #888;
+}
+
+.rail.crossed {
+  stroke: #c88;
 }
 
 .highlighted {

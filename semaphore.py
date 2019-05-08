@@ -1,8 +1,9 @@
 
-from browser import document, html, svg, window
+from browser import document, html, svg
 
 WIDTH = 1200
 HEIGHT = 530
+
 
 class Train:
     pass
@@ -20,9 +21,11 @@ class Switch:
     enabled = False
 
 
-
 class Exit:
-    COLORS = ['red', 'blue', 'green', 'orange', 'gold', 'brown', 'darkcyan', 'deeppink', 'olive']
+    COLORS = [
+        'red', 'blue', 'green',
+        'orange', 'gold', 'brown', 'darkcyan', 'deeppink', 'olive'
+    ]
 
 
 def curved_path(start, end, relative=False):
@@ -35,27 +38,90 @@ def curved_path(start, end, relative=False):
             start=start, end=end, scx=start.x + dcx, ecx=end.x - dcx
         )
 
+
+def rail_segment_path(start, end, relative=False):
+    if relative:
+        return 'M0 0' + curved_path(start, end, True)
+    else:
+        return 'M{0.x} {0.y}'.format(start) + curved_path(start, end, False)
+
+
 class Rail:
     ROW_TRANSFER_LENGTHS = [3, 6]
     MIN_ROW_TRANSFER_LENGTH = min(ROW_TRANSFER_LENGTHS)
     BRAKE_OFFSET = 0.5
     CRASH_OFFSET = 0.1
 
-    # def __init__(self, node1, node2):
-        # if node1.col > node2.col:
-            # node1, node2 = node2, node1
-        # self.left_node = node1
-        # self.right_node = node2
-        # self.left_node.add_right_rail(self)
-        # self.right_node.add_left_rail(self)
+    def __init__(self, node1, node2):
+        if node1.col > node2.col:
+            node1, node2 = node2, node1
+        self.left_node = node1
+        self.right_node = node2
+        self.left_node.add_right_rail(self)
+        self.right_node.add_left_rail(self)
+        self.crossings = []
+        self.path = None
 
-    # def draw(self):
-        # self.path = svg.
-        # self.left_node.check_dead_ends()
-        # self.right_node.check_dead_ends()
+    def draw(self):
+        self.path = svg.path(
+            d=rail_segment_path(self.left_node, self.right_node)
+        )
+        self.path.classList.add('rail')
+        if self.crossings:
+            self.path.classList.add('crossed')
+        self.left_node.redraw()
+        self.right_node.redraw()
+        return self.path
+
+    def get_crossings(self, rails):
+        if self.left_node.row == self.right_node.row:
+            return []
+        row_splits = {
+            self.left_node.row: self.left_node.col,
+            self.right_node.row: self.right_node.col,
+        }
+        for rail in rails:
+            crossable = (
+                rail.left_node.row != rail.right_node.row
+                and rail.left_node.row in row_splits
+                and rail.right_node.row in row_splits
+            )
+            if crossable:
+                left_split = row_splits[rail.left_node.row]
+                right_split = row_splits[rail.right_node.row]
+                crosses = (
+                    rail.left_node.col < left_split
+                    and rail.right_node.col > right_split
+                ) or (
+                    rail.left_node.col > left_split
+                    and rail.right_node.col < right_split
+                )
+                if crosses:
+                    yield rail
+
+    def add_crossing(self, rail):
+        ml = self.left_node
+        rl = rail.left_node
+        mr = self.right_node
+        rr = rail.right_node
+        # compute line intersection (approximate)
+        t = (
+            ml.col * (rl.row - rr.row)
+            + rl.col * (rr.row - ml.row)
+            + rr.col * (ml.row - rl.row)
+        ) / (
+            (ml.col - mr.col) * (rl.row - rr.row)
+            + (rl.col - rr.col) * (mr.row - ml.row)
+        )
+        if self.path:
+            self.path.classList.add('crossed')
+        self.crossings.append((rail, t))
+
+    def __repr__(self):
+        return '<Rail{0.left_node}-{0.right_node}>'.format(self)
 
     @classmethod
-    def path(cls, nodes):
+    def path_d(cls, nodes):
         return 'M {0.x} {0.y}'.format(nodes[0]) + ''.join(
             # go horizontal if rows are equal
             ('H ' + str(next.x)) if prev.row == next.row
@@ -63,11 +129,6 @@ class Rail:
             else curved_path(prev, next)
             for prev, next in zip(nodes[:-1], nodes[1:])
         )
-
-
-class RailSegment:
-    pass
-
 
 
 class Grid:
@@ -88,8 +149,6 @@ class Grid:
                 yield node
 
     def resize(self):
-        # self._win_width = window.innerWidth
-        # self._win_height = window.innerHeight
         self._win_width = WIDTH
         self._win_height = HEIGHT
         self.row_height = self._win_height / (self.rows + 1)
@@ -104,7 +163,12 @@ class Grid:
         self.rail_layer = svg.g(id='raillayer')
         self.node_layer = self.draw_nodes()
         self.aux_pt = self.svg_interface.createSVGPoint()
-        return [self.builder_layer, self.grid_layer, self.rail_layer, self.node_layer]
+        return [
+            self.builder_layer,
+            self.grid_layer,
+            self.rail_layer,
+            self.node_layer,
+        ]
 
     def draw_grid(self):
         layer = svg.g(id='gridlayer')
@@ -130,9 +194,11 @@ class Grid:
         self.aux_pt.y = y_scr
         transform = self.svg_interface.getScreenCTM().inverse()
         svg_pt = self.aux_pt.matrixTransform(transform)
-        # print(WIDTH, HEIGHT, svg_pt.x, svg_pt.y, 
-        return self.nodes[int(round(svg_pt.y / self.row_height - 1))][int(round(svg_pt.x / self.col_width - 1))]
-        # return self.nodes[int(round(svg_pt.y / self.row_height))][int(round(svg_pt.x / self.col_width))]
+        return self.nodes[
+            int(round(svg_pt.y / self.row_height - 1))
+        ][
+            int(round(svg_pt.x / self.col_width - 1))
+        ]
 
     def row_to_y(self, row):
         return (row + 1) * self.row_height
@@ -140,11 +206,15 @@ class Grid:
     def col_to_x(self, col):
         return (col + 1) * self.col_width
 
-    # def build_rail(self, node1, node2):
-        # new_rail = Rail(node1, node2)
-        # self.rails.append(new_rail)
-        # self._update_segments(new_rail)
-        # self.rail_layer <= new_rail.draw()
+    def build_rail(self, node1, node2):
+        if not node1.has_rail_to(node2):
+            new_rail = Rail(node1, node2)
+            print('building', new_rail)
+            for rail in new_rail.get_crossings(self.rails):
+                rail.add_crossing(new_rail)
+                new_rail.add_crossing(rail)
+            self.rails.append(new_rail)
+            self.rail_layer <= new_rail.draw()
 
     def _update_segments(self, rail):
         pass
@@ -156,7 +226,10 @@ class Grid:
         pass
 
     def _generate_nodes(self):
-        return [[Node(i, j) for j in range(self.cols)] for i in range(self.rows)]
+        return [
+            [Node(i, j) for j in range(self.cols)]
+            for i in range(self.rows)
+        ]
 
     def __repr__(self):
         return '<Grid({0.rows}x{0.cols})>'.format(self)
@@ -177,21 +250,27 @@ class RailBuilder:
 
     def enable(self):
         for node in self.grid.iternodes():
-            node.bind_drag_events(self)
+            node.enable_building(self)
         self.catcher.bind('mousemove', self.drag_moved)
         self.catcher.bind('mouseup', self.drag_ended)
+        self.drag_path = None
         self.drag_origin = None
 
     def disable(self):
         self.drag_ended()
         for node in self.grid.iternodes():
-            node.unbind_drag_events()
+            node.disable_building()
         self.catcher.unbind('mousemove')
         self.catcher.unbind('mouseup')
 
     def drag_started(self, event):
+        if self.drag_origin:
+            return
+        print('drag started')
         self.drag_origin = self.grid.closest_node_screen(event.x, event.y)
         self.drag_origin.show_build_endpoint()
+        if self.drag_path:
+            self.drag_path.remove()
         self.drag_path = svg.path()
         self.drag_path.classList.add('build-path')
         self.layer <= self.drag_path
@@ -201,6 +280,7 @@ class RailBuilder:
     def drag_moved(self, event):
         if not self.drag_origin:
             return
+        print('drag moved')
         drag_current = self.grid.closest_node_screen(event.x, event.y)
         if drag_current != self.drag_current:
             self.drag_current = drag_current
@@ -211,14 +291,15 @@ class RailBuilder:
                 self.drag_nodes[-1].hide_build_endpoint()
             if new_drag_nodes:
                 new_drag_nodes[-1].show_build_endpoint()
-                self.drag_path.attrs['d'] = Rail.path(new_drag_nodes)
+                self.drag_path.attrs['d'] = Rail.path_d(new_drag_nodes)
                 tgt_opacity = 1
             else:
                 tgt_opacity = 0
             self.drag_nodes = new_drag_nodes
             self.drag_path.style.stroke_opacity = tgt_opacity
 
-    def drag_ended(self, event):
+    def drag_ended(self, event=None):
+        print('drag ended')
         if not self.drag_origin:
             return
         self.drag_origin.hide_build_endpoint()
@@ -236,17 +317,25 @@ class RailBuilder:
         while current.col != target.col:
             if current.row == target.row:
                 # straight path
-                current = self.grid.nodes[target.row][current.col + col_direction]
+                next_col = current.col + col_direction
+                current = self.grid.nodes[target.row][next_col]
             else:
-                cols_per_row = abs(current.col - target.col) / abs(current.row - target.row)
+                cols_per_row = (
+                    abs(current.col - target.col)
+                    / abs(current.row - target.row)
+                )
                 if (cols_per_row < Rail.MIN_ROW_TRANSFER_LENGTH):
-                    break # too sharp turn
+                    break  # too sharp turn
                 # longest row switch that is under cols_per_row
                 rowswitch_length = max(
                     l for l in Rail.ROW_TRANSFER_LENGTHS if l <= cols_per_row
                 )
                 # move by one row and some columns in the right direction
-                current = self.grid.nodes[current.row + row_direction][current.col + col_direction * rowswitch_length]
+                current = self.grid.nodes[
+                    current.row + row_direction
+                ][
+                    current.col + col_direction * rowswitch_length
+                ]
             path.append(current)
         return self.strip_built_parts(path)
 
@@ -269,13 +358,10 @@ class RailBuilder:
                 path = path[:end_i+1]
         return path if len(path) >= 2 else []
 
-
     def build_rails(self, nodes):
-        print('building rail between', nodes)
-        # if len(nodes) > 1:
-            # for i in range(len(nodes) - 1):
-                # self.grid.build_rail(nodes[i], nodes[i+1])
-
+        if len(nodes) > 1:
+            for i in range(len(nodes) - 1):
+                self.grid.build_rail(nodes[i], nodes[i+1])
 
 
 class Node:
@@ -290,15 +376,24 @@ class Node:
         self._left_links = []
         self._right_links = []
 
+    def add_left_rail(self, rail):
+        self.left_rails.append(rail)
+        self._left_links.append(rail.left_node)
+
+    def add_right_rail(self, rail):
+        self.right_rails.append(rail)
+        self._right_links.append(rail.right_node)
+
     def draw(self, x, y):
         self.x = x
         self.y = y
         self.object = svg.g(
-            transform='translate({},{})'.format(x,y),
+            transform='translate({},{})'.format(x, y),
             id=self.id,
         )
         self.object.classList.add('node')
         self.object <= svg.circle(cx=0, cy=0, r=7)
+        self.dead_end_stop = None
         return self.object
 
     def get_element(self):
@@ -310,19 +405,33 @@ class Node:
         else:
             return node in self._left_links
 
+    def redraw(self):
+        is_dead_end = (len(self.left_rails) == 0 or len(self.right_rails) == 0)
+        if is_dead_end and not self.dead_end_stop:
+            self.dead_end_stop = svg.rect(
+                x=-2, y=-5, width=4, height=10,
+                id='deadend-' + self.id,
+            )
+            self.dead_end_stop.classList.add('deadend')
+            self.object <= self.dead_end_stop
+        elif not is_dead_end and self.dead_end_stop:
+            self.dead_end_stop.remove()
+            self.dead_end_stop = None
+
     def show_build_endpoint(self):
         self.object.classList.add('build-endpoint')
 
     def hide_build_endpoint(self):
         self.object.classList.remove('build-endpoint')
 
-    def bind_drag_events(self, dragger):
-        # self.object.draggable = True
+    def enable_building(self, dragger):
+        self.object.classList.add('building')
         self.object.bind('mousedown', dragger.drag_started)
         self.object.bind('mousemove', dragger.drag_moved)
         self.object.bind('mouseup', dragger.drag_ended)
 
-    def unbind_drag_events(self):
+    def disable_building(self):
+        self.object.classList.remove('building')
         self.object.unbind('mousedown')
         self.object.unbind('mousemove')
         self.object.unbind('mouseup')
