@@ -65,9 +65,10 @@ class Exit:
         'red', 'blue', 'green',
         'orange', 'gold', 'brown', 'darkcyan', 'deeppink', 'olive'
     ]
-    
+    highlighter = None
+
     is_exit = True
-    
+
     def __init__(self, node, i):
         self.node = node
         self.left = (self.node.col == 0)
@@ -76,30 +77,34 @@ class Exit:
         print('color for exit', i, 'is', self.color)
         self.id = 'exit-{}'.format(self.i)
         self.rail = None
-    
+
+    @property
+    def active_rail(self):
+        return {self.left: None, not self.left: self.rail}
+
     @property
     def col(self):
         return self.node.col + (-1 if self.left else 1)
-    
+
     @property
     def row(self):
         return self.node.row
-    
+
     def get_link(self, left):
         if left == not self.left:
             return self.node
         else:
             return None
-    
+
     def add_rail(self, rail, left):
         if left == self.left:
             raise ValueError('cannot add rail to exit side of exit')
         else:
             self.rail = rail
-                        
+
     def has_rail_to(self, node):
         return node == self.node and self.rail is not None
-            
+
     def draw(self, grid):
         self.x = 0 if self.left else WIDTH
         self.y = self.node.y
@@ -113,33 +118,53 @@ class Exit:
             height=grid.row_height,
             color=self.color,
         )
+        self.object.bind('mouseover', self.highlight_route)
+        self.object.bind('mouseout', self.unhighlight_route)
         return self.object
-    
+
+    def current_rail_route(self):
+        route_left = not self.left
+        node = self
+        route = []
+        while True:
+            rail = node.active_rail[route_left]
+            if not rail:
+                break
+            route.append(rail)
+            node = rail.get_node(route_left)
+            if node.active_rail[not route_left] != rail:
+                break
+        return route
+
+    def highlight_route(self, event=None):
+        if self._highlighting:
+            route = self.current_rail_route()
+            self.highlighter.style.stroke = self.color
+            self.highlighter.attrs['d'] = ' '.join(
+                rail.path.attrs['d'] for rail in route
+            )
+
+    def unhighlight_route(self, event=None):
+        self.highlighter.attrs['d'] = ''
+
     def redraw(self):
         pass
-        
+
     def __repr__(self):
         return '<Exit-{}@{}{}>'.format(
             self.i, dirtext(self).capitalize(), self.row
         )
-    
+
     @classmethod
-    def random(cls, grid):
-        n_exits = len(grid.exits)
-        n_left = sum(e.left for e in grid.exits)
-        left = random.random() < ((1 - n_left / n_exits) if n_exits else .5)
-        col_i = 0 if left else grid.cols - 1
-        free = False
-        while not free:
-            row_i = int(random.normalvariate(
-                grid.rows / 2, grid.rows / 3 + 3 * n_exits
-            ))
-            if row_i < 0 or row_i >= grid.rows:
-                continue
-            node = grid.nodes[row_i][col_i]
-            free = all(exit.node != node for exit in grid.exits)
-        return cls(node, n_exits)
-        
+    def enable_highlight(cls):
+        cls._highlighting = True
+
+    @classmethod
+    def disable_highlight(cls):
+        cls._highlighting = False
+        if cls.highlighter:
+            cls.highlighter.attrs['d'] = ''
+
 
 def random_color():
     return ('#' + '{:02X}' * 3).format(*(
@@ -333,6 +358,9 @@ class Grid:
         self.rail_layer = svg.g(id='raillayer')
         self.node_layer = self.draw_nodes()
         self.exit_layer = svg.g(id='exitlayer')
+        Exit.highlighter = svg.path(id='routehighlighter')
+        Exit.highlighter.classList.add('highlighted')
+        self.exit_layer <= Exit.highlighter
         self.aux_pt = self.svg_interface.createSVGPoint()
         return [
             self.builder_layer,
@@ -390,19 +418,13 @@ class Grid:
                 new_rail.add_crossing(rail)
             self.rails.append(new_rail)
             self.rail_layer <= new_rail.draw()
-            
+
     def add_exit(self, exit):
         self.exits.append(exit)
         self.exit_layer <= exit.draw(self)
         self.build_rail(exit, exit.node)
 
     def _update_segments(self, rail):
-        pass
-
-    def enable_route_highlight(self):
-        pass
-
-    def disable_route_highlight(self):
         pass
 
     def _generate_nodes(self):
@@ -646,21 +668,23 @@ class Node:
         return '<Node({0.row},{0.col})>'.format(self)
 
 
+class MainController:
+    def __init__(self, grid):
+        self.mode_controller = ModeController(grid)
+        self.train_controller = TrainController()
+        self.exit_controller = ExitController(grid)
+
+    def draw(self):
+        yield self.mode_controller.draw()
+        yield self.exit_controller.draw()
+
+    def activate(self):
+        self.mode_controller.activate()
+
+
 class TrainController:
     def __init__(self):
         self.trains = []
-
-
-class Scheduler:
-    def __init__(self, train_controller=None, exit_controller=None):
-        self.train_controller = train_controller
-        self.exit_controller = exit_controller
-
-    def set_train_controller(self, train_controller):
-        self.train_controller = train_controller
-
-    def set_exit_controller(self, exit_controller):
-        self.exit_controller = exit_controller
 
 
 class ModeController:
@@ -676,7 +700,7 @@ class ModeController:
     def draw(self):
         self.button = html.BUTTON(self.TEXTS[self.active])
         self.button.bind('click', self.flip_active)
-        document['body'] <= self.button
+        return self.button
 
     def flip_active(self, event):
         if self.active:
@@ -686,31 +710,47 @@ class ModeController:
         self.button.innerHTML = self.TEXTS[self.active]
 
     def activate(self):
-        self.grid.disable_route_highlight()
+        Exit.disable_highlight()
         Switch.enabled = False
         self.grid.builder.enable()
         self.active = True
 
     def deactivate(self):
-        self.grid.enable_route_highlight()
+        Exit.enable_highlight()
         Switch.enabled = True
         self.grid.builder.disable()
         self.active = False
-        
-        
+
+
 class ExitController:
     def __init__(self, grid):
         self.grid = grid
-        
+
     def draw(self):
         self.button = html.BUTTON('Add random exit')
         self.button.bind('click', self.new_random_exit)
-        document['body'] <= self.button
-        
+        return self.button
+
     def new_random_exit(self, event=None):
-        exit = Exit.random(self.grid)
-        self.grid.add_exit(exit)
-        
+        self.grid.add_exit(self.random_exit_position())
+
+    def random_exit_position(self):
+        n_exits = len(self.grid.exits)
+        n_left = sum(e.left for e in self.grid.exits)
+        left = random.random() < ((1 - n_left / n_exits) if n_exits else .5)
+        col_i = 0 if left else self.grid.cols - 1
+        free = False
+        while not free:
+            print(self.grid.rows, 1 + n_exits / 2)
+            row_i = int(random.normalvariate(
+                self.grid.rows / 2, self.grid.rows / 5 + 2 * n_exits
+            ))
+            if row_i < 0 or row_i >= grid.rows:
+                continue
+            node = self.grid.nodes[row_i][col_i]
+            free = all(exit.node != node for exit in self.grid.exits)
+        return Exit(node, n_exits)
+
 
 class Game:
     SVG_ATTRS = {
@@ -719,23 +759,19 @@ class Game:
         'class': 'svg-content-responsive'
     }
 
-    def __init__(self, grid, scheduler):
+    def __init__(self, grid, controller):
         self.grid = grid
-        self.scheduler = scheduler
-        self.mode_controller = ModeController(self.grid)
-        self.train_controller = TrainController()
-        self.scheduler.set_train_controller(self.train_controller)
-        self.exit_controller = ExitController(self.grid)
-        self.scheduler.set_exit_controller(self.exit_controller)
+        self.controller = controller
 
     def draw(self):
-        self.mode_controller.draw()
-        self.exit_controller.draw()
         container = html.DIV()
         container.classList.add('svg-container')
         self.svg = self._create_svg()
         container <= self.svg
-        document['body'] <= container
+        body = document['body']
+        for control_element in self.controller.draw():
+            body <= control_element
+        body <= container
         for g in self.grid.draw(self.svg):
             self.svg <= g
 
@@ -747,9 +783,10 @@ class Game:
         return svg_el
 
     def start(self):
-        self.mode_controller.activate()
+        self.controller.activate()
 
-
-game = Game(Grid(15, 30), Scheduler())
+grid = Grid(15, 30)
+controller = MainController(grid)
+game = Game(grid, controller)
 game.draw()
 game.start()
