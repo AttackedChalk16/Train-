@@ -1,9 +1,15 @@
+import random
 
 from browser import document, html, svg
 
 WIDTH = 1200
 HEIGHT = 530
 
+# Backlog
+# Fix point aiming bug for higher coordinates
+# Switch flipping
+# Exit path highlighting
+# Train placement
 
 class Train:
     pass
@@ -24,8 +30,6 @@ class Switch:
     def __init__(self, node, left):
         self.node = node
         self.left = left
-        self.dirtext = 'left' if self.left else 'right'
-        self.position = 0
         self.arrow = None
 
     def draw(self):
@@ -33,11 +37,11 @@ class Switch:
         self.arrow = svg.path(d=d)
         self.arrow.bind('click', self.switch)
         self.arrow.classList.add('switch')
-        self.arrow.classList.add('switch-' + self.dirtext)
+        self.arrow.classList.add('switch-' + dirtext(self))
         return self.arrow
 
     def _path(self):
-        target = self.node.get_link(self.left, self.position)
+        target = self.node.get_link(self.left)
         part = self.LENGTH_FRACTION / (abs(target.col - self.node.col) ** .75)
         return rail_segment_d(self.node, target, part, relative=True)
 
@@ -47,11 +51,12 @@ class Switch:
 
     def switch(self, event=None):
         if self.enabled:
-            print('switch ', self, ' flipped')
+            self.node.flip_switch(self.left)
+            self.arrow.attrs['d'] = self._path()
 
     def __repr__(self):
         return '<{}Switch{}({})>'.format(
-            self.dirtext.capitalize(), self.node, self.position
+            dirtext(self).capitalize(), self.node, self.position
         )
 
 
@@ -60,6 +65,104 @@ class Exit:
         'red', 'blue', 'green',
         'orange', 'gold', 'brown', 'darkcyan', 'deeppink', 'olive'
     ]
+    
+    is_exit = True
+    
+    def __init__(self, node, i):
+        self.node = node
+        self.left = (self.node.col == 0)
+        self.i = i
+        self.color = self.COLORS[i] if i < len(self.COLORS) else random_color()
+        print('color for exit', i, 'is', self.color)
+        self.id = 'exit-{}'.format(self.i)
+        self.rail = None
+    
+    @property
+    def col(self):
+        return self.node.col + (-1 if self.left else 1)
+    
+    @property
+    def row(self):
+        return self.node.row
+    
+    def get_link(self, left):
+        if left == not self.left:
+            return self.node
+        else:
+            return None
+    
+    def add_rail(self, rail, left):
+        if left == self.left:
+            raise ValueError('cannot add rail to exit side of exit')
+        else:
+            self.rail = rail
+                        
+    def has_rail_to(self, node):
+        return node == self.node and self.rail is not None
+            
+    def draw(self, grid):
+        self.x = 0 if self.left else WIDTH
+        self.y = self.node.y
+        self.object = svg.g(
+            transform='translate({},{})'.format(self.x, self.y),
+            id=self.id,
+        )
+        self.object.classList.add('exit')
+        self.object <= centered_rect(
+            width=int(grid.col_width * .66),
+            height=grid.row_height,
+            color=self.color,
+        )
+        return self.object
+    
+    def redraw(self):
+        pass
+        
+    def __repr__(self):
+        return '<Exit-{}@{}{}>'.format(
+            self.i, dirtext(self).capitalize(), self.row
+        )
+    
+    @classmethod
+    def random(cls, grid):
+        n_exits = len(grid.exits)
+        n_left = sum(e.left for e in grid.exits)
+        left = random.random() < ((1 - n_left / n_exits) if n_exits else .5)
+        col_i = 0 if left else grid.cols - 1
+        free = False
+        while not free:
+            row_i = int(random.normalvariate(
+                grid.rows / 2, grid.rows / 3 + 3 * n_exits
+            ))
+            if row_i < 0 or row_i >= grid.rows:
+                continue
+            node = grid.nodes[row_i][col_i]
+            free = all(exit.node != node for exit in grid.exits)
+        return cls(node, n_exits)
+        
+
+def random_color():
+    return ('#' + '{:02X}' * 3).format(*(
+        int(random.random() * 256) for i in range(3)
+    ))
+
+
+def dirtext(obj):
+    return 'left' if obj.left else 'right'
+
+
+def centered_rect(width, height, x=0, y=0, color='black', id=None, classes=[]):
+    rect = svg.rect(
+        x=(x - width / 2),
+        y=(y - height / 2),
+        width=width,
+        height=height,
+        id=id,
+    )
+    rect.style.fill = color
+    for c in classes:
+        rect.classList.add(c)
+    return rect
 
 
 def curve_coors(start, end, part=1):
@@ -131,10 +234,13 @@ class Rail:
             node1, node2 = node2, node1
         self.left_node = node1
         self.right_node = node2
-        self.left_node.add_right_rail(self)
-        self.right_node.add_left_rail(self)
+        self.left_node.add_rail(self, left=False)
+        self.right_node.add_rail(self, left=True)
         self.crossings = []
         self.path = None
+
+    def get_node(self, left):
+        return self.left_node if left else self.right_node
 
     def draw(self):
         self.path = svg.path(
@@ -226,12 +332,14 @@ class Grid:
         self.grid_layer = self.draw_grid()
         self.rail_layer = svg.g(id='raillayer')
         self.node_layer = self.draw_nodes()
+        self.exit_layer = svg.g(id='exitlayer')
         self.aux_pt = self.svg_interface.createSVGPoint()
         return [
             self.builder_layer,
             self.grid_layer,
             self.rail_layer,
             self.node_layer,
+            self.exit_layer,
         ]
 
     def draw_grid(self):
@@ -254,10 +362,13 @@ class Grid:
         return layer
 
     def closest_node_screen(self, x_scr, y_scr):
+        # TODO find out why this does not produce correct coordinates at bottom of screen
+        # use SVG element position?
         self.aux_pt.x = x_scr
         self.aux_pt.y = y_scr
         transform = self.svg_interface.getScreenCTM().inverse()
         svg_pt = self.aux_pt.matrixTransform(transform)
+        print(svg_pt.x, svg_pt.y, int(round(svg_pt.y / self.row_height - 1)), int(round(svg_pt.x / self.col_width - 1)))
         return self.nodes[
             int(round(svg_pt.y / self.row_height - 1))
         ][
@@ -279,6 +390,11 @@ class Grid:
                 new_rail.add_crossing(rail)
             self.rails.append(new_rail)
             self.rail_layer <= new_rail.draw()
+            
+    def add_exit(self, exit):
+        self.exits.append(exit)
+        self.exit_layer <= exit.draw(self)
+        self.build_rail(exit, exit.node)
 
     def _update_segments(self, rail):
         pass
@@ -429,33 +545,41 @@ class RailBuilder:
 
 
 class Node:
+    is_exit = False
+
     def __init__(self, row, col):
         self.row = row
         self.col = col
         self.x = None
         self.y = None
         self.id = 'n{0.row}-{0.col}'.format(self)
-        self.left_rails = []
-        self.right_rails = []
-        self._left_links = []
-        self._right_links = []
-        self.left_switch = None
-        self.right_switch = None
+        self.rails = {True: [], False: []}
+        self._links = {True: [], False: []}
+        self.active_rail = {True: None, False: None}
+        self._active_link = {True: None, False: None}
+        self.switches = {True: None, False: None}
 
-    def get_link(self, left, index):
-        return (self._left_links if left else self._right_links)[index]
+    def flip_switch(self, left):
+        switch_i = self.rails[left].index(self.active_rail[left])
+        new_switch_i = (switch_i + 1) % len(self.rails[left])
+        self.active_rail[left] = self.rails[left][new_switch_i]
+        self._active_link[left] = self._links[left][new_switch_i]
 
-    def add_left_rail(self, rail):
-        self.left_rails.append(rail)
-        self._left_links.append(rail.left_node)
-        if len(self.left_rails) == 2:
-            self.left_switch = Switch(self, True)
+    def get_link(self, left):
+        return self._active_link[left]
 
-    def add_right_rail(self, rail):
-        self.right_rails.append(rail)
-        self._right_links.append(rail.right_node)
-        if len(self.right_rails) == 2:
-            self.right_switch = Switch(self, False)
+    def add_rail(self, rail, left):
+        other_node = rail.get_node(left)
+        self.rails[left].append(rail)
+        self.rails[left].sort(
+            key=lambda r: (r.get_node(left).row - self.row) / abs(r.get_node(left).col - self.col)
+        )
+        self._links[left] = [r.get_node(left) for r in self.rails[left]]
+        if len(self.rails[left]) == 1:
+            self.active_rail[left] = rail
+            self._active_link[left] = other_node
+        elif len(self.rails[left]) == 2:
+            self.switches[left] = Switch(self, left)
 
     def draw(self, x, y):
         self.x = x
@@ -473,15 +597,12 @@ class Node:
         return document[self.id]
 
     def has_rail_to(self, node):
-        if node.col > self.col:
-            return node in self._right_links
-        else:
-            return node in self._left_links
+        return node in self._links[node.col <= self.col]
 
     def redraw(self):
         self.redraw_dead_end()
-        self.redraw_switch(self.left_switch)
-        self.redraw_switch(self.right_switch)
+        for sw in self.switches.values():
+            self.redraw_switch(sw)
 
     def redraw_switch(self, sw):
         if sw is not None:
@@ -490,10 +611,11 @@ class Node:
                 self.object <= switch_object
 
     def redraw_dead_end(self):
-        is_dead_end = (len(self.left_rails) == 0 or len(self.right_rails) == 0)
+        is_dead_end = any(r is None for r in self.active_rail.values())
+        print(self, is_dead_end, self.dead_end_stop)
         if is_dead_end and not self.dead_end_stop:
-            self.dead_end_stop = svg.rect(
-                x=-2, y=-5, width=4, height=10,
+            self.dead_end_stop = centered_rect(
+                width=4, height=10,
                 id='deadend-' + self.id,
             )
             self.dead_end_stop.classList.add('deadend')
@@ -530,11 +652,15 @@ class TrainController:
 
 
 class Scheduler:
-    def __init__(self, controller=None):
-        self.controller = controller
+    def __init__(self, train_controller=None, exit_controller=None):
+        self.train_controller = train_controller
+        self.exit_controller = exit_controller
 
-    def set_controller(self, controller):
-        self.controller = controller
+    def set_train_controller(self, train_controller):
+        self.train_controller = train_controller
+
+    def set_exit_controller(self, exit_controller):
+        self.exit_controller = exit_controller
 
 
 class ModeController:
@@ -570,7 +696,21 @@ class ModeController:
         Switch.enabled = True
         self.grid.builder.disable()
         self.active = False
-
+        
+        
+class ExitController:
+    def __init__(self, grid):
+        self.grid = grid
+        
+    def draw(self):
+        self.button = html.BUTTON('Add random exit')
+        self.button.bind('click', self.new_random_exit)
+        document['body'] <= self.button
+        
+    def new_random_exit(self, event=None):
+        exit = Exit.random(self.grid)
+        self.grid.add_exit(exit)
+        
 
 class Game:
     SVG_ATTRS = {
@@ -584,10 +724,13 @@ class Game:
         self.scheduler = scheduler
         self.mode_controller = ModeController(self.grid)
         self.train_controller = TrainController()
-        self.scheduler.set_controller(self.train_controller)
+        self.scheduler.set_train_controller(self.train_controller)
+        self.exit_controller = ExitController(self.grid)
+        self.scheduler.set_exit_controller(self.exit_controller)
 
     def draw(self):
         self.mode_controller.draw()
+        self.exit_controller.draw()
         container = html.DIV()
         container.classList.add('svg-container')
         self.svg = self._create_svg()
